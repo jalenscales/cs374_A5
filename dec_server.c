@@ -54,7 +54,6 @@ void handle_client(int client_fd) {
     if (bytes_sent < 0) {
         perror("send");
     }
-
     close(client_fd);
     exit(0);
 }
@@ -64,7 +63,6 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Usage: %s port\n", argv[0]);
         return 1;
     }
-
     int port = atoi(argv[1]);
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
@@ -74,23 +72,19 @@ int main(int argc, char *argv[]) {
 
     int yes = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
-
     struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = INADDR_ANY;
-
     if (bind(listen_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("bind");
         exit(1);
     }
-
     if (listen(listen_fd, BACKLOG) < 0) {
         perror("listen");
         exit(1);
     }
-
     printf("dec_server listening on port %d\n", port);
 
     while (1) {

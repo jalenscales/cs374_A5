@@ -52,7 +52,6 @@ int main(int argc, char *argv[]) {
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
     if (connect(sock_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         fprintf(stderr, "Error: could not contact enc_server on port %d\n", port);
         return 2;
