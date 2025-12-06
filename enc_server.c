@@ -1,59 +1,148 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include <unistd.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <sys/wait.h>
 #include <signal.h>
 
-#define BACKLOG 5  
+#define BUFFER_SIZE 1024
 
-void handle_client(int client_fd) {
-    close(client_fd);
-    exit(0);
+void error(const char *msg) {
+    perror(msg);
+    exit(1);
 }
+
+void send_all(int socket, const void *buffer, size_t length) {
+    size_t total_sent = 0;
+    const char *ptr = buffer;
+    while (total_sent < length) {
+        ssize_t sent = send(socket, ptr + total_sent, length - total_sent, 0);
+        if (sent == -1) error("Error sending data");
+        total_sent += sent;
+    }
+}
+
+void recv_all(int socket, void *buffer, size_t length) {
+    size_t total_received = 0;
+    char *ptr = buffer;
+    while (total_received < length) {
+        ssize_t received = recv(socket, ptr + total_received, length - total_received, 0);
+        if (received <= 0) error("Error receiving data (socket closed or failed)");
+        total_received += received;
+    }
+}
+
+char encrypt_char(char p, char k) {
+    int p_val = (p == ' ') ? 26 : (p - 'A');
+    int k_val = (k == ' ') ? 26 : (k - 'A');
+    
+    int c_val = (p_val + k_val) % 27;
+    
+    return (c_val == 26) ? ' ' : (c_val + 'A');
+}
+
+void handle_sigchld(int sig) {
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+}
+
+void setupAddressStruct(struct sockaddr_in *address, int portNumber) {
+    memset((char *)address, '\0', sizeof(*address));
+    address->sin_family = AF_INET;
+    address->sin_port = htons(portNumber);
+    address->sin_addr.s_addr = INADDR_ANY;
+}
+
+
+void handle_client(int connectionSocket) {
+    char auth_buffer[16]; 
+    memset(auth_buffer, 0, sizeof(auth_buffer));
+    
+    ssize_t charsRead = recv(connectionSocket, auth_buffer, sizeof(auth_buffer) - 1, 0);
+    if (charsRead < 0) error("ERROR reading from socket");
+    
+    if (strcmp(auth_buffer, "ENC_REQ") != 0) {
+        char *reject = "REJECT";
+        send(connectionSocket, reject, strlen(reject), 0);
+        fprintf(stderr, "Error: Client rejected (wrong ID: %s)\n", auth_buffer);
+        close(connectionSocket);
+        exit(2); 
+    }
+    
+    char *ack = "ACCEPT";
+    send_all(connectionSocket, ack, strlen(ack));
+    int text_length;
+    recv_all(connectionSocket, &text_length, sizeof(text_length));
+    char *plaintext = malloc(text_length + 1);
+    recv_all(connectionSocket, plaintext, text_length);
+    plaintext[text_length] = '\0'; 
+    char *key = malloc(text_length + 1);
+    recv_all(connectionSocket, key, text_length);
+    key[text_length] = '\0';
+
+    char *ciphertext = malloc(text_length + 1);
+    for (int i = 0; i < text_length; i++) {
+        if (plaintext[i] == '\n') { 
+            ciphertext[i] = '\n'; 
+            continue; 
+        }
+        ciphertext[i] = encrypt_char(plaintext[i], key[i]);
+    }
+    ciphertext[text_length] = '\0';
+
+    send_all(connectionSocket, ciphertext, text_length);
+    free(plaintext);
+    free(key);
+    free(ciphertext);
+    close(connectionSocket);
+    exit(0); 
+}
+
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s port\n", argv[0]);
-        return 1;
+    int listenSocket, connectionSocket;
+    struct sockaddr_in serverAddress, clientAddress;
+    socklen_t sizeOfClientInfo;
+
+    if (argc < 2) { 
+        fprintf(stderr,"USAGE: %s port\n", argv[0]); 
+        exit(1); 
     }
-    int port = atoi(argv[1]);
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) {
-        perror("socket");
-        exit(1);
-    }
+
+    listenSocket = socket(AF_INET, SOCK_STREAM, 0); 
+    if (listenSocket < 0) error("ERROR opening socket");
     int yes = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(listen_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("bind");
-        exit(1);
-    }
-    if (listen(listen_fd, BACKLOG) < 0) {
-        perror("listen");
-        exit(1);
-    }
-    printf("enc_server listening on port %d\n", port);
+    setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+    setupAddressStruct(&serverAddress, atoi(argv[1]));
+
+    if (bind(listenSocket, (struct sockaddr *)&serverAddress, sizeof(serverAddress)) < 0)
+        error("ERROR on binding");
+    listen(listenSocket, 5); 
+    
+    struct sigaction sa;
+    sa.sa_handler = handle_sigchld;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGCHLD, &sa, NULL);
+
     while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t addr_size = sizeof(client_addr);
-        int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &addr_size);
-        if (client_fd < 0) {
-            perror("accept");
-            continue;
+        sizeOfClientInfo = sizeof(clientAddress); 
+        connectionSocket = accept(listenSocket, (struct sockaddr *)&clientAddress, &sizeOfClientInfo); 
+        if (connectionSocket < 0) error("ERROR on accept");
+        pid_t pid = fork();
+        if (pid < 0) {
+            error("ERROR on fork");
+        } 
+        if (pid == 0) {
+            close(listenSocket); 
+            handle_client(connectionSocket);
+        } else {
+            close(connectionSocket); 
         }
-        if (fork() == 0) {  
-            close(listen_fd);
-            handle_client(client_fd);
-        }
-        close(client_fd); 
     }
-    close(listen_fd);
-    return 0;
+
+    close(listenSocket);
+    return 0; 
 }
+//u

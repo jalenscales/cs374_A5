@@ -3,21 +3,22 @@
 #include <time.h>
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: keygen keylength\n");
-        return 1;
+    if (argc < 2) {
+        fprintf(stderr, "Error: You must provide the key length.\n");
+        fprintf(stderr, "Usage: %s keylength\n", argv[0]);
+        exit(1);
     }
-    int keylength = atoi(argv[1]);
-    if (keylength <= 0) {
-        fprintf(stderr, "Error: key length must be positive\n");
-        return 1;
-    }
+
+    int key_length = atoi(argv[1]);
     srand(time(NULL));
-    for (int i = 0; i < keylength; i++) {
-        int r = rand() % 27;  
-        char c = (r == 26) ? ' ' : 'A' + r;
-        putchar(c);
+    char allowed_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
+
+    for (int i = 0; i < key_length; i++) {
+        int random_index = rand() % 27;
+        fprintf(stdout, "%c", allowed_chars[random_index]);
     }
-    putchar('\n'); 
+    fprintf(stdout, "\n");
+
     return 0;
 }
+//u

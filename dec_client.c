@@ -1,105 +1,140 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <arpa/inet.h>
+#include <string.h>
+#include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
 #include <ctype.h>
 
-#define BUFFER_SIZE 4096
+void error(const char *msg, int exit_code) {
+    perror(msg);
+    exit(exit_code);
+}
 
-int validate_file(const char *filename) {
+void send_all(int socket, const void *buffer, size_t length) {
+    size_t total_sent = 0;
+    const char *ptr = buffer;
+    while (total_sent < length) {
+        ssize_t sent = send(socket, ptr + total_sent, length - total_sent, 0);
+        if (sent == -1) error("Error sending data", 2);
+        total_sent += sent;
+    }
+}
+
+void recv_all(int socket, void *buffer, size_t length) {
+    size_t total_received = 0;
+    char *ptr = buffer;
+    while (total_received < length) {
+        ssize_t received = recv(socket, ptr + total_received, length - total_received, 0);
+        if (received <= 0) error("Error receiving data (socket closed or failed)", 2);
+        total_received += received;
+    }
+}
+long get_file_content(char *filename, char **content) {
     FILE *fp = fopen(filename, "r");
-    if (!fp) return -1;
-    int c;
-    while ((c = fgetc(fp)) != EOF) {
-        if (c == '\n') break; 
-        if (c != ' ' && (c < 'A' || c > 'Z')) {
-            fclose(fp);
-            return 0; 
+    if (fp == NULL) {
+        fprintf(stderr, "Error: Could not open file %s\n", filename);
+        exit(1);
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long length = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    *content = malloc(length + 1);
+    if (*content == NULL) error("Memory allocation failed", 1);
+
+    fread(*content, 1, length, fp);
+    fclose(fp);
+
+    if (length > 0 && (*content)[length - 1] == '\n') {
+        (*content)[length - 1] = '\0';
+        length--;
+    } else {
+        (*content)[length] = '\0';
+    }
+
+    return length;
+}
+
+void validate_chars(char *text, long length, const char *filename) {
+    for (int i = 0; i < length; i++) {
+        if (!((text[i] >= 'A' && text[i] <= 'Z') || text[i] == ' ')) {
+            fprintf(stderr, "dec_client error: input contains bad characters in %s\n", filename);
+            exit(1);
         }
     }
-    fclose(fp);
-    return 1; 
-}
-int read_file(const char *filename, char *buffer, int max_len) {
-    FILE *fp = fopen(filename, "r");
-    if (!fp) return -1;
-
-    if (!fgets(buffer, max_len, fp)) {
-        fclose(fp);
-        return -1;
-    }
-
-    int len = strlen(buffer);
-    if (buffer[len-1] == '\n') buffer[len-1] = '\0';
-    fclose(fp);
-    return strlen(buffer);
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 4) {
-        fprintf(stderr, "Usage: %s ciphertext key port\n", argv[0]);
-        return 1;
-    }
-    char *ciphertext_file = argv[1];
-    char *key_file = argv[2];
-    int port = atoi(argv[3]);
-    if (validate_file(ciphertext_file) != 1) {
-        fprintf(stderr, "dec_client error: input contains bad characters\n");
-        return 1;
-    }
-    if (validate_file(key_file) != 1) {
-        fprintf(stderr, "dec_client error: key contains bad characters\n");
-        return 1;
-    }
-    char ciphertext[BUFFER_SIZE];
-    char key[BUFFER_SIZE];
-    int ct_len = read_file(ciphertext_file, ciphertext, BUFFER_SIZE);
-    int key_len = read_file(key_file, key, BUFFER_SIZE);
-    if (ct_len < 0 || key_len < 0) {
-        fprintf(stderr, "dec_client error: cannot read files\n");
-        return 1;
-    }
-    if (key_len < ct_len) {
-        fprintf(stderr, "Error: key '%s' is too short\n", key_file);
-        return 1;
-    }
-    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_fd < 0) {
-        perror("socket");
-        return 2;
-    }
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    server_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); 
+    int socketFD, portNumber;
+    struct sockaddr_in serverAddress;
+    struct hostent *serverHostInfo;
+    char *ciphertext = NULL;
+    char *key = NULL;
 
-    if (connect(sock_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        fprintf(stderr, "Error: could not contact dec_server on port %d\n", port);
-        return 2;
+    if (argc < 4) {
+        fprintf(stderr, "USAGE: %s ciphertext key port\n", argv[0]);
+        exit(1);
     }
-    if (send(sock_fd, ciphertext, ct_len, 0) < 0) {
-        perror("send ciphertext");
-        close(sock_fd);
-        return 2;
+    long cipher_len = get_file_content(argv[1], &ciphertext);
+    long key_len = get_file_content(argv[2], &key);
+
+    validate_chars(ciphertext, cipher_len, argv[1]);
+    validate_chars(key, key_len, argv[2]);
+
+    if (key_len < cipher_len) {
+        fprintf(stderr, "Error: key '%s' is too short\n", argv[2]);
+        exit(1);
     }
 
-    if (send(sock_fd, key, ct_len, 0) < 0) { 
-        perror("send key");
-        close(sock_fd);
-        return 2;
+    portNumber = atoi(argv[3]);
+    socketFD = socket(AF_INET, SOCK_STREAM, 0);
+    if (socketFD < 0) error("CLIENT: ERROR opening socket", 2);
+
+    serverHostInfo = gethostbyname("localhost");
+    if (serverHostInfo == NULL) {
+        fprintf(stderr, "CLIENT: ERROR, no such host\n");
+        exit(2);
     }
-    char plaintext[BUFFER_SIZE];
-    int bytes_received = recv(sock_fd, plaintext, sizeof(plaintext)-1, 0);
-    if (bytes_received < 0) {
-        perror("recv");
-        close(sock_fd);
-        return 2;
+
+    memset((char*)&serverAddress, '\0', sizeof(serverAddress));
+    serverAddress.sin_family = AF_INET;
+    bcopy((char*)serverHostInfo->h_addr, (char*)&serverAddress.sin_addr.s_addr, serverHostInfo->h_length);
+    serverAddress.sin_port = htons(portNumber);
+
+    if (connect(socketFD, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
+        fprintf(stderr, "Error: could not contact dec_server on port %d\n", portNumber);
+        exit(2);
     }
-    plaintext[bytes_received] = '\0';
-    printf("%s\n", plaintext);
-    close(sock_fd);
+    char *id = "DEC_REQ";
+    send_all(socketFD, id, strlen(id));
+    char buffer[16];
+    memset(buffer, 0, sizeof(buffer));
+    recv(socketFD, buffer, sizeof(buffer) - 1, 0); 
+
+    if (strcmp(buffer, "ACCEPT") != 0) {
+        fprintf(stderr, "Error: Connection rejected by server (Wrong Server?)\n");
+        close(socketFD);
+        exit(2);
+    }
+
+    int payload_size = (int)cipher_len;
+    send_all(socketFD, &payload_size, sizeof(payload_size));
+    send_all(socketFD, ciphertext, cipher_len);
+    send_all(socketFD, key, cipher_len);
+    char *plaintext = malloc(cipher_len + 1);
+    recv_all(socketFD, plaintext, cipher_len);
+    plaintext[cipher_len] = '\0';
+
+    fprintf(stdout, "%s\n", plaintext);
+    close(socketFD);
+    free(ciphertext);
+    free(key);
+    free(plaintext);
+
     return 0;
 }
+//u
